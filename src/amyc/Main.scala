@@ -1,8 +1,8 @@
 package amyc
 
 import utils._
-import ast._
 import parsing._
+import ast._
 import analyzer._
 import codegen._
 import virtualMachine._

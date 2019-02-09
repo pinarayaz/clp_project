@@ -23,12 +23,12 @@ object VirtualMachine extends Pipeline[Module, Unit] {
     var pc = 0
 
     //Define method call stack
-    val CALL_STACK_SIZE: Int = 1000000
+    val CALL_STACK_SIZE: Int = 4000000
     val callStack: Array[Int] = new Array[Int](CALL_STACK_SIZE)
     var csPointer = 0
 
     //Define the main stack
-    val MAIN_STACK_SIZE: Int = 1000000
+    val MAIN_STACK_SIZE: Int = 4000000
     val mainStack: Array[Int] = new Array[Int](MAIN_STACK_SIZE)
     var msPointer = 0
 
@@ -38,8 +38,8 @@ object VirtualMachine extends Pipeline[Module, Unit] {
     callStack(2) = mainMethod.locals
 
     //Define data memory and global memory
-    val DATA_MEMORY_SIZE: Int = 1000000
-    val dataMemory: Array[Byte] = new Array[Byte](DATA_MEMORY_SIZE)
+    val DATA_MEMORY_SIZE: Int = 4000000
+    val dataMem: Array[Byte] = new Array[Byte](DATA_MEMORY_SIZE)
     val GLOBAL_NUM: Int = 10
     val globals: Array[Int] = new Array[Int](GLOBAL_NUM)
 
@@ -59,9 +59,11 @@ object VirtualMachine extends Pipeline[Module, Unit] {
     var labelsAndIndices: Map[String, Integer] = Map()
 
     while (true) {
-      if (pc == EOP) return
-      val instruction: Instructions.Instruction = instMem(pc)
-      pc = executeInstruction(instruction)
+      if (pc != EOP) {
+        val instruction: Instructions.Instruction = instMem(pc)
+        pc = executeInstruction(instruction)
+      }
+      else return
     }
 
     def movePC(value: Int): Int = {
@@ -87,17 +89,17 @@ object VirtualMachine extends Pipeline[Module, Unit] {
     }
 
     def store(address: Int, value: Int): Unit = {
-      dataMemory(address + 3) = ((value & 0xFF000000) >> 3 * 8).toByte
-      dataMemory(address + 2) = ((value & 0x00FF0000) >> 2 * 8).toByte
-      dataMemory(address + 1) = ((value & 0x0000FF00) >> 1 * 8).toByte
-      dataMemory(address + 0) = ((value & 0x000000FF) >> 0 * 8).toByte
+      dataMem(address + 0) = ((value & 0x000000FF) >> 0 * 8).toByte
+      dataMem(address + 1) = ((value & 0x0000FF00) >> 1 * 8).toByte
+      dataMem(address + 2) = ((value & 0x00FF0000) >> 2 * 8).toByte
+      dataMem(address + 3) = ((value & 0xFF000000) >> 3 * 8).toByte
     }
 
     def load(address: Int): Int = {
-      val byte3: Int = (dataMemory(address + 0) & 0xFF) << 0
-      val byte2: Int = (dataMemory(address + 1) & 0xFF) << 8
-      val byte1: Int = (dataMemory(address + 2) & 0xFF) << 16
-      val byte0: Int = (dataMemory(address + 3) & 0xFF) << 24
+      val byte0: Int = (dataMem(address + 3) & 0xFF) << 24
+      val byte1: Int = (dataMem(address + 2) & 0xFF) << 16
+      val byte2: Int = (dataMem(address + 1) & 0xFF) << 8
+      val byte3: Int = (dataMem(address + 0) & 0xFF) << 0
 
       byte0 + byte1 + byte2 + byte3
     }
@@ -107,53 +109,108 @@ object VirtualMachine extends Pipeline[Module, Unit] {
       mainStack(msPointer)
     }
 
-    def findMatchingElseInstruction(elsePointer: Int, nestedCounter: Int): Int = {
-      var nc = nestedCounter
+    def findMatchingElseInstruction(elsePointer: Int, counter: Int): Int = {
+      var countr = counter
       var ep = elsePointer
-      do {
-        val currentInstruction = instMem(ep)
+
+      var currentInstruction = instMem(ep)
+      if (currentInstruction == If_i32 || currentInstruction == If_void)
+        countr = countr + 1
+      else if (currentInstruction == Else)
+        countr = countr - 1
+      ep = ep + 1
+
+      while (countr != 0) {
+        currentInstruction = instMem(ep)
         if (currentInstruction == If_i32 || currentInstruction == If_void)
-          nc = nc + 1
+          countr = countr + 1
         else if (currentInstruction == Else)
-          nc = nc - 1
+          countr = countr - 1
         ep = ep + 1
-      } while (nc != 0)
+      }
 
       ep
     }
 
-    def findMatchingEndInstruction(endPointer: Int, nestedCounter: Int): Int = {
-      var nc = nestedCounter
+    def findMatchingEndInstruction(endPointer: Int, counter: Int): Int = {
+      var countr = counter
       var ep = endPointer
-      do {
-        val currentInstruction = instMem(ep)
+
+      var currentInstruction = instMem(ep)
+      if (currentInstruction == Else)
+        countr = countr + 1
+      else if (currentInstruction == End)
+        countr = countr - 1
+
+      ep = ep + 1
+
+      while (countr != 0) {
+        currentInstruction = instMem(ep)
         if (currentInstruction == Else)
-          nc = nc + 1
+          countr = countr + 1
         else if (currentInstruction == End)
-          nc = nc - 1
+          countr = countr - 1
 
         ep = ep + 1
-      } while (nc != 0)
+      }
 
       ep
+    }
+
+    def executeIfInstructions(): Int = {
+      msPointer = msPointer - 1
+      val ifCondVal = mainStack(msPointer)
+      val (elseInstruction, endInstruction) = iteEndIndices.getOrElse(pc, {
+        var elsePointer = pc
+
+        elsePointer = findMatchingElseInstruction(elsePointer, 0)
+        elsePointer = elsePointer - 1
+
+        var endPointer = elsePointer
+        endPointer = findMatchingEndInstruction(endPointer, 0)
+        endPointer = endPointer - 1
+
+        iteEndIndices += (pc -> (elsePointer, endPointer))
+        (elsePointer, endPointer)
+      })
+
+      //Execute the instruction between two indices
+      def executeBlock(firstIndex: Int, lastIndex: Int): Int = {
+        pc = firstIndex
+        var branch = false
+
+        //Execute the instructions until reached the last instruction or branch
+        while (pc != lastIndex && !branch) {
+          val current = instMem(pc)
+          if (current.isInstanceOf[Br]) branch = true
+          else pc = executeInstruction(current)
+        }
+
+        if (!instMem(pc).isInstanceOf[Br]) endInstruction + 1
+        else executeInstruction(instMem(pc))
+      }
+
+      //Execute if or else
+      if (ifCondVal == 0) executeBlock(elseInstruction + 1, endInstruction)
+      else executeBlock(pc + 1, elseInstruction)
     }
 
     def executeNonStdInstructions(name: String): Int = {
       val otherMethod = methods.filter(_.name == name).head
-      val returnAddress = pc + 1
       val numOfLocalsCur = callStack(csPointer + 2)
-      val numOfLocalsOther = otherMethod.args + otherMethod.locals
 
-      csPointer = csPointer + FRAME_DATA_FIELD_NUM + numOfLocalsCur
-      callStack(csPointer) = returnAddress
+      csPointer = FRAME_DATA_FIELD_NUM + numOfLocalsCur + csPointer
+      callStack(csPointer + 2) = otherMethod.args + otherMethod.locals
       callStack(csPointer + 1) = numOfLocalsCur
-      callStack(csPointer + 2) = numOfLocalsOther
+      callStack(csPointer) = pc + 1
 
       var argCounter = otherMethod.args
+      var csPointer2 = argCounter + csPointer + FRAME_DATA_FIELD_NUM - 1
       while (argCounter > 0) {
         msPointer = msPointer - 1
-        callStack(argCounter + csPointer + FRAME_DATA_FIELD_NUM - 1) = mainStack(msPointer)
+        callStack(csPointer2) = mainStack(msPointer)
         argCounter = argCounter - 1
+        csPointer2 = argCounter + csPointer + FRAME_DATA_FIELD_NUM - 1
       }
       methodStartIndices(otherMethod.name)
     }
@@ -190,7 +247,7 @@ object VirtualMachine extends Pipeline[Module, Unit] {
           val leastSignificantByte: Int = updateMSPointerSingleByte() & 0x000000FF
           msPointer = msPointer - 1
           val address: Int = mainStack(msPointer)
-          dataMemory(address) = leastSignificantByte.toByte
+          dataMem(address) = leastSignificantByte.toByte
           pc + 1
 
         case Load =>
@@ -204,7 +261,8 @@ object VirtualMachine extends Pipeline[Module, Unit] {
 
         case Load8_u =>
           //Load an i32 value from memory and zero extend
-          mainStack(msPointer) = dataMemory(updateMSPointerSingleByte()) & 0x000000FF
+          val address = updateMSPointerSingleByte()
+          mainStack(msPointer) = dataMem(address) & 0x000000FF
           msPointer = msPointer + 1
           pc + 1
 
@@ -237,8 +295,8 @@ object VirtualMachine extends Pipeline[Module, Unit] {
               var string = ""
               var counter = mainStack(msPointer - 1)
               //Loop until reached null terminator
-              while (dataMemory(counter) != 0) {
-                string = string ++ dataMemory(counter).toChar.toString
+              while (dataMem(counter) != 0) {
+                string = string ++ dataMem(counter).toChar.toString
                 counter = counter + 1
               }
               println(string)
@@ -305,46 +363,11 @@ object VirtualMachine extends Pipeline[Module, Unit] {
           csPointer = csPointer - callStack(csPointer + 1) - FRAME_DATA_FIELD_NUM
           tempReturnAddress
 
-        case If_i32 | If_void =>
-          msPointer = msPointer - 1
-          val ifCondVal = mainStack(msPointer)
-          val (elseInstruction, endInstruction) = iteEndIndices.getOrElse(pc, {
-            val elseEndPair = {
-              val nestedCounter = 0
-              var elsePointer = pc
+        case If_i32 =>
+          executeIfInstructions()
 
-              elsePointer = findMatchingElseInstruction(elsePointer, nestedCounter)
-              elsePointer = elsePointer - 1
-
-              var endPointer = elsePointer
-              endPointer = findMatchingEndInstruction(endPointer, nestedCounter)
-              endPointer = endPointer - 1
-
-              (elsePointer, endPointer)
-            }
-            iteEndIndices += (pc -> (elseEndPair._1, elseEndPair._2))
-            elseEndPair
-          })
-
-          //Execute the instruction between two indices
-          def executeBlock(firstIndex: Int, lastIndex: Int): Int = {
-            pc = firstIndex
-            var branch = false
-
-            //Execute the instructions until reached the last instruction or branch
-            while (pc != lastIndex && !branch) {
-              val current = instMem(pc)
-              if (current.isInstanceOf[Br]) branch = true
-              else pc = executeInstruction(current)
-            }
-
-            if (instMem(pc).isInstanceOf[Br]) executeInstruction(instMem(pc))
-            else endInstruction + 1
-          }
-
-          //Execute if or else
-          if (ifCondVal != 0) executeBlock(pc + 1, elseInstruction)
-          else executeBlock(elseInstruction + 1, endInstruction)
+        case If_void =>
+          executeIfInstructions()
 
         case End =>
           pc + 1
